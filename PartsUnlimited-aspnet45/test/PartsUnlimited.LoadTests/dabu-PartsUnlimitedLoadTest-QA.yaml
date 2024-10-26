@@ -1,0 +1,7 @@
+version: v0.1
+testName: dabu-PartsUnlimitedLoadTest-QA
+testPlan: dabu-PartsUnlimitedLoadTest-QA.jmx
+description: Parts Unlimited QA Post-Deployment Run
+engineInstances: 3
+failureCriteria:
+  - avg(response_time_ms) > 600

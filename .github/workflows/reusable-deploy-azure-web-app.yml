@@ -1,0 +1,67 @@
+name: Deploy Azure Web App
+
+on:
+  workflow_call:
+    inputs:
+      environment-name:
+        required: true
+        type: string
+      artifact-name:
+        required: true
+        type: string
+      artifact-path:
+        required: true
+        type: string
+      website-name:
+        required: true
+        type: string
+      slot-name:
+        required: true
+        type: string
+
+permissions:
+  id-token: write # This is required for requesting the JWT
+  contents: read  # This is required for actions/checkout
+
+jobs:
+
+  DeployAzureWebApp:
+
+    runs-on: windows-latest
+
+    environment: 
+      name: ${{ inputs.environment-name }}
+      url: ${{ steps.DeployWebApp.outputs.webapp-url }}
+      
+    steps:
+
+     - name: Checkout
+       uses: actions/checkout@v4
+       
+     - name: OIDC Login to Azure
+       uses: azure/login@v2
+       continue-on-error: false
+       with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          enable-AzPSSession: true
+
+     - name: Download build artifact
+       uses: actions/download-artifact@v4
+       with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+
+     - name: Deploy Azure WebApp
+       id: DeployWebApp
+       uses: azure/webapps-deploy@v3
+       with:
+          app-name: ${{ inputs.website-name }}
+          slot-name: ${{ inputs.slot-name }}
+          package: ${{ inputs.artifact-name }}
+
+     - name: Azure logout
+       run: |
+          az logout
+

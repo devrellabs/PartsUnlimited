@@ -1,0 +1,65 @@
+name: Run Playwright Tests
+
+on:
+  workflow_call:
+    inputs:
+      environment-name:
+        required: true
+        type: string
+      artifact-name:
+        required: true
+        type: string
+      artifact-path:
+        required: true
+        type: string
+      test-file:
+        required: true
+        type: string
+      test-args:
+        required: false
+        type: string
+      continue-if-error:
+        required: true
+        type: boolean            
+    
+jobs:
+
+  Run-Playwright-Tests:
+
+    runs-on: ubuntu-latest
+
+    environment: 
+      name: ${{ inputs.environment-name }}
+      
+    steps:
+      
+     - name: Checkout
+       uses: actions/checkout@v4
+
+     - name: Setup Node
+       uses: actions/setup-node@v4
+       with:
+         node-version: '18'
+
+     # install npm dependencies
+     - name: Install dependencies
+       run: npm ci
+
+     # Install Playwright with dependencies
+     - name: Install Playwright
+       run: npx playwright install --with-deps
+     
+     # Run Playwright tests with the specified test file and arguments
+     - name: Run Playwright tests
+       continue-on-error: ${{ inputs.continue-if-error }}
+       run: npx playwright test ${{ inputs.test-file }} ${{ inputs.test-args }}
+
+     # Upload test results
+     - name: Upload test results
+       uses: actions/upload-artifact@v4
+       with:
+         name: ${{ inputs.environment-name }}-${{ inputs.artifact-name }}
+         path: ${{ inputs.artifact-path }}/
+         retention-days: 30
+    
+

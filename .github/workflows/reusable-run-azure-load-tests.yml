@@ -1,0 +1,82 @@
+name: Run Azure Load Tests
+
+on:
+  workflow_call:
+    inputs:
+      environment-name:
+        required: true
+        type: string
+      artifact-name:
+        required: true
+        type: string
+      artifact-path:
+        required: true
+        type: string
+      load-test-config-file:
+        required: true
+        type: string
+      load-test-resource:
+        required: true
+        type: string
+      azure-webapp-url:
+        required: true
+        type: string
+
+permissions:
+  id-token: write # This is required for requesting the JWT
+  contents: read  # This is required for actions/checkout
+
+jobs:
+
+  RunAzureLoadTests:
+
+    runs-on: ubuntu-latest
+
+    environment: 
+      name: ${{ inputs.environment-name }}
+      
+    steps:
+
+      ###########################################
+      # Load Test the Web App
+      ###########################################
+      - name: Download load test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: LoadTests
+          path: LoadTests
+
+      - name: OIDC Login to Azure
+        uses: azure/login@v2
+        continue-on-error: false
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }} 
+          enable-AzPSSession: true
+
+      - name: Azure Load Testing
+        uses: azure/load-testing@v1
+        continue-on-error: true
+        with:
+          loadTestConfigFile: ${{ inputs.load-test-config-file }}
+          loadTestResource: "${{ inputs.load-test-resource }}" 
+          resourceGroup: ${{ vars.Azure_Resource_Group }}
+          env: |
+            [
+              {
+              "name": "webapp",
+              "value": "${{ inputs.azure-webapp-url }}"
+              }
+            ]          
+      
+      - name: Upload Load Test Results
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ inputs.environment-name }}-${{ inputs.artifact-name }}
+          path: ${{ github.workspace }}/${{ inputs.artifact-path }}
+          
+      - name: Azure logout
+        run: |
+          az logout

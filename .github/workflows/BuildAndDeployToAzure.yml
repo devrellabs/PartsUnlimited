@@ -1,0 +1,340 @@
+name: Build_And_Deploy_To_Azure
+###################################################################
+# Environment Variables                                           #
+###################################################################
+env:
+  # Open IDC Connect variables
+  ACTIONS_ID_TOKEN_REQUEST_URL: 'TBD'
+  ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'TBD'
+  # ARM Template Parameters
+  TAG_CICD_Engine_Name: GitHub Actions
+  ARM_FILE_PATH: 'PartsUnlimited-aspnet45/env/PartsUnlimitedEnv/Templates'
+  ARM_FILE_NAME: 'FullEnvironmentSetupMerged'
+  Deployment_Name: PartsUnlimited.${{ github.workflow }}.${{ github.run_number }}
+  # Webapp variables
+  AZURE_WEBAPP_NAME: 'PartsUnlimited'
+
+###################################################################
+# Triggers - Controls when the action will run.                   #
+###################################################################
+on:
+  # Triggers the workflow on push or pull request events but only for the main branch
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+# This workflow contains a multiple jobs: "CI", "Dev", "QA", "Prod"
+###################################################################
+# CI Stage                                                        #
+###################################################################
+  CI:
+    # The type of runner that the job will run on
+    runs-on: windows-2019
+
+    environment:
+      name: Dev
+
+    env: 
+      # Path to the solution file relative to the root of the project.
+      SOLUTION_FILE_PATH: 'PartsUnlimited-aspnet45'
+      SOLUTION: 'PartsUnlimited-aspnet45/PartsUnlimited.sln'
+      ARTIFACT_STAGING_PATH: 'PartsUnlimited-aspnet45/src/PartsUnlimitedWebsite'
+      ARTIFACT_STAGING_FOLDER: 'bin/Website'
+      UNIT_TESTS_STAGING_PATH: 'PartsUnlimited-aspnet45/test/PartsUnlimited.UnitTests/bin'
+      UI_TESTS_STAGING_PATH: 'PartsUnlimited-aspnet45/test/PartsUnlimited.PlaywrightTests'
+      LOAD_TESTS_PATH: 'PartsUnlimited-aspnet45/test/PartsUnlimited.LoadTests'
+  
+      # Configuration type to build.
+      # You can convert this to a build matrix if you need coverage of multiple configuration types.
+      # https://docs.github.com/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
+      BUILD_PLATFORM: 'anycpu'
+      BUILD_CONFIGURATION: Release
+
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read  # This is required for actions/checkout
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      ###########################################
+      # Build App
+      ###########################################
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        env:
+          cache-name: Cache-NuGet-Packages
+        with:
+          path: "PartsUnlimited-aspnet45/packages"
+          key: ${{ env.cache-name }}-${{ hashFiles('PartsUnlimited-aspnet45/src/PartsUnlimitedWebsite/packages.config') }}-${{ hashFiles('PartsUnlimited-aspnet45/test/PartsUnlimited.SeleniumTests/packages.config') }}-${{ hashFiles('PartsUnlimited-aspnet45/test/PartsUnlimited.UnitTests/packages.config') }}
+
+      - name: Restore NuGet packages
+        working-directory: ${{env.GITHUB_WORKSPACE}}
+        run: nuget restore ${{env.SOLUTION_FILE_PATH}}
+
+      - name: Build
+        working-directory: ${{env.GITHUB_WORKSPACE}}
+        # Add additional options to the MSBuild command line here (like platform or verbosity level).
+        # See https://docs.microsoft.com/visualstudio/msbuild/msbuild-command-line-reference
+        run: msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:PlatformTarget=${{ env.BUILD_PLATFORM }} /p:DeployOnBuild=true /p:DeployDefaultTarget=WebPublish /p:WebPublishMethod=FileSystem /p:DeleteExistingFiles=True /p:publishUrl="${{env.GITHUB_WORKSPACE}}/${{env.ARTIFACT_STAGING_PATH}}/${{env.ARTIFACT_STAGING_FOLDER}}" ${{env.SOLUTION}} 
+
+      ###########################################
+      # Upload Artifacts
+      ###########################################
+      - name: Upload Build Artifacts
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Website
+          path: "${{env.GITHUB_WORKSPACE}}/${{env.ARTIFACT_STAGING_PATH}}/${{env.ARTIFACT_STAGING_FOLDER}}"
+
+      - name: Upload Load Test Artifacts
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoadTests
+          path: "${{env.LOAD_TESTS_PATH}}"
+
+      ###########################################
+      # Run Unit Tests
+      ###########################################
+      - name: Setup VSTest path
+        uses: darenm/Setup-VSTest@v1      
+        
+      - name: Run Unit Tests
+        run: vstest.console.exe "${{env.UNIT_TESTS_STAGING_PATH}}/${{env.BUILD_CONFIGURATION}}/PartsUnlimited.UnitTests.dll" /Platform:x64 /TestCaseFilter:"TestCategory=Unit Tests"
+
+      ###########################################
+      # Validate the ARM Template
+      ###########################################
+      - name: Cache ARM Template
+        # Use a cache of the ARM Templates and the related hash values to determine if the ARM Temlates changed.
+        # If they did not change, we will not execute the following actions. 
+        id: CacheARMTemplateCI
+        uses: actions/cache@v4
+        env:
+          cache-name: Cache-ARMTemplateCI
+        with:
+          path: "${{env.ARM_FILE_PATH}}"
+          key: ${{env.cache-name}}-${{hashFiles('PartsUnlimited-aspnet45/env/PartsUnlimitedEnv/Templates/FullEnvironmentSetupMerged.json')}}-${{hashFiles('PartsUnlimited-aspnet45/env/PartsUnlimitedEnv/Templates/FullEnvironmentSetupMerged.param.json')}}
+
+      - name: Upload ARM Artifacts
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARM_Templates
+          path: "${{ env.ARM_FILE_PATH }}/${{ env.ARM_FILE_NAME }}.*"
+        
+###################################################################
+# Provision-Resources Stage                                                       #
+###################################################################
+  Provision-Resources:
+    if: contains(github.event_name, 'push')
+    
+    # The type of runner that the job will run on
+    runs-on: windows-2019
+
+    environment:
+      name: Dev
+
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read  # This is required for actions/checkout
+
+    needs: CI
+    steps:
+      ###########################################
+      # Deploy the ARM Template
+      ###########################################
+      - name: Download ARM Files
+        uses: actions/download-artifact@v4
+        with:
+          name: ARM_Templates
+          path: ${{ env.ARM_FILE_PATH }}
+          
+      - name: Cache ARM Template
+        # Use a cache of the ARM Templates and the related hash values to determine if the ARM Temlates changed.
+        # If they did not change, we will not execute the following actions. 
+        id: CacheARMTemplateDev
+        uses: actions/cache@v4
+        env:
+          cache-name: Cache-ARMTemplateDev
+        with:
+          path: "${{env.ARM_FILE_PATH}}"
+          key: ${{env.cache-name}}-${{hashFiles('PartsUnlimited-aspnet45/env/PartsUnlimitedEnv/Templates/FullEnvironmentSetupMerged.json')}}-${{hashFiles('PartsUnlimited-aspnet45/env/PartsUnlimitedEnv/Templates/FullEnvironmentSetupMerged.param.json')}}
+
+      - name: OIDC Login to Azure
+        if: ${{steps.CacheARMTemplateCI.outputs.cache-hit==false}}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }} 
+          enable-AzPSSession: true
+
+      - name: "Deploy ARM Template"
+        id: DeployARMTemplate
+        if: ${{steps.CacheARMTemplateDev.outputs.cache-hit==false}}        
+        continue-on-error: true
+        uses: azure/arm-deploy@v2
+        with:
+         subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+         resourceGroupName: ${{ vars.Azure_Resource_Group }}
+         template: ${{ env.ARM_FILE_PATH }}/${{ env.ARM_FILE_NAME }}.json
+         parameters: ${{ env.ARM_FILE_PATH }}/${{ env.ARM_FILE_NAME }}.param.json CICDEngineName="${{ env.TAG_CICD_Engine_Name }}" PUL_ServerName=${{ vars.SQL_Server_Name }} PUL_DBLogin=${{ secrets.SQL_DB_LOGIN }} PUL_DBPassword=${{ secrets.SQL_DB_PASSWORD }} PUL_DBPasswordForTest=${{ secrets.SQL_DB_PASSWORD }} PUL_HostingPlanName=${{ vars.Hosting_Plan_Name }} WebsiteName=${{ vars.Website_Name }} 
+         deploymentMode: Incremental
+         deploymentName: ${{ env.Deployment_Name }}
+
+      - name: Azure logout
+        if: ${{steps.CacheARMTemplateDev.outputs.cache-hit==false}}               
+        run: |
+          az logout
+
+  ###########################################
+  # Deploy the Web App
+  ###########################################
+  Dev:
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read  # This is required for actions/checkout
+
+    uses: ./.github/workflows/reusable-deploy-azure-web-app.yml
+    if: contains(github.event_name, 'push')
+    needs: Provision-Resources  # Use this for normal deployment
+    with:
+      environment-name: Dev
+      artifact-name: Website
+      artifact-path: Website
+      website-name: ${{ vars.WEBSITE_NAME }}
+      slot-name: Dev
+    secrets: inherit
+          
+  
+###################################################################
+# Dev Playwright Test Stage                                       #
+###################################################################
+  Dev_Playwright_Tests:
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read  # This is required for actions/checkout
+      
+    uses: ./.github/workflows/reusable-run-playwright-tests.yml
+    if: contains(github.event_name, 'push')
+    needs: Dev
+    with:
+      environment-name: Dev
+      artifact-name: playwright-report
+      artifact-path: playwright-report
+      test-file: PlaywrightTests/PartsUnlimited-L1AndL2.spec.ts
+      test-args: --grep @LEVEL_1
+      continue-if-error: false
+    secrets: inherit
+
+###################################################################
+# QA Stage                                                        #
+###################################################################
+  QA:
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read  # This is required for actions/checkout
+      
+    uses: ./.github/workflows/reusable-deploy-azure-web-app.yml
+    if: contains(github.event_name, 'push')
+    needs: [Dev, Dev_Playwright_Tests]
+    with:
+      environment-name: QA
+      artifact-name: Website
+      artifact-path: Website
+      website-name: ${{ vars.WEBSITE_NAME }}
+      slot-name: QA
+    secrets: inherit
+
+###################################################################
+# QA Playwright Test Stage                                        #
+###################################################################
+  QA_Playwright_Tests:
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read  # This is required for actions/checkout
+      
+    uses: ./.github/workflows/reusable-run-playwright-tests.yml
+    if: contains(github.event_name, 'push')
+    needs: QA
+    with:
+      environment-name: QA_Tests
+      artifact-name: playwright-report
+      artifact-path: playwright-report
+      test-file: PlaywrightTests/PartsUnlimited-L1AndL2.spec.ts
+      continue-if-error: true
+    secrets: inherit
+
+###################################################################
+# QA Load Test Stage                                              #
+###################################################################
+  QA_Load_Tests:
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read  # This is required for actions/checkout
+      
+    uses: ./.github/workflows/reusable-run-azure-load-tests.yml
+    if: contains(github.event_name, 'push')
+    needs: QA
+    with:
+      environment-name: QA_Tests
+      artifact-name: load-test-report
+      artifact-path: loadTest
+      load-test-config-file: LoadTests/PartsUnlimitedLoadTest-QA.yaml
+      load-test-resource: PartsUnlimited
+      azure-webapp-url: PartsUnlimited-QA.azurewebsites.net
+    secrets: inherit
+
+###################################################################
+# Production Stage                                                #
+###################################################################
+  Production:
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read  # This is required for actions/checkout
+      
+    uses: ./.github/workflows/reusable-deploy-azure-web-app.yml
+    if: contains(github.event_name, 'push')
+    needs: QA_Playwright_Tests
+    with:
+      environment-name: Production
+      artifact-name: Website
+      artifact-path: Website
+      website-name: ${{ vars.WEBSITE_NAME }}
+      slot-name: Production
+    secrets: inherit
+
+###################################################################
+# Production Load Test Stage                                      #
+###################################################################
+  Production_Load_Tests:
+    permissions:
+      id-token: write # This is required for requesting the JWT
+      contents: read  # This is required for actions/checkout
+      
+    uses: ./.github/workflows/reusable-run-azure-load-tests.yml
+    if: contains(github.event_name, 'push')
+    needs: Production
+    with:
+      environment-name: Production_Tests
+      artifact-name: load-test-report
+      artifact-path: loadTest
+      load-test-config-file: LoadTests/PartsUnlimitedLoadTest.yaml
+      load-test-resource: PartsUnlimited
+      azure-webapp-url: PartsUnlimited.azurewebsites.net
+    secrets: inherit
